@@ -163,7 +163,7 @@ contract CoveragePool is ERC4626, ReentrancyGuard {
     ///         anterior, se suma a la nueva.
     /// @dev Se mide el balance recibido en lugar de fiarse de `amount`: asi se
     ///      soportan tokens con comision por transferencia (fee-on-transfer).
-    function notifyRewardAmount(uint256 amount, uint256 duration) external onlyRegistry nonReentrant {
+    function notifyRewardAmount(uint256 amount, uint256 duration) external nonReentrant onlyRegistry {
         if (amount == 0) revert ZeroAmount();
         if (duration == 0) revert InvalidDuration();
         _updateReward(address(0));
@@ -219,7 +219,7 @@ contract CoveragePool is ERC4626, ReentrancyGuard {
     /// @dev El cap es ACUMULADO sobre la foto tomada al congelar. Si fuera por
     ///      llamada, varios slashes pequenos podrian sumar mas que el maximo
     ///      (5 x 20% ya vacia el pool aunque cada uno respete un cap del 50%).
-    function slash(uint256 assets, address recipient) external onlyClaimManager nonReentrant {
+    function slash(uint256 assets, address recipient) external nonReentrant onlyClaimManager {
         if (!frozen) revert PoolNotFrozen();
         if (assets == 0) revert ZeroAmount();
         if (recipient == address(0)) revert ZeroAddress();

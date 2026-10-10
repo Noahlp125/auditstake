@@ -187,7 +187,7 @@ contract ClaimManager is ReentrancyGuard {
     /// @notice El arbitro decide un claim disputado.
     /// @param valid True si el exploit es real.
     /// @param amount Cuanto recortar si es valido (puede ser menos de lo pedido).
-    function resolveDispute(uint256 claimId, bool valid, uint256 amount) external onlyArbiter nonReentrant {
+    function resolveDispute(uint256 claimId, bool valid, uint256 amount) external nonReentrant onlyArbiter {
         Claim storage c = _claims[claimId];
         if (c.status != Status.Disputed) revert WrongStatus(c.status);
 
