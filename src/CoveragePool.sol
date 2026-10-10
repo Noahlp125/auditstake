@@ -22,12 +22,19 @@ contract CoveragePool is ERC4626, ReentrancyGuard {
     error ZeroAmount();
     error ReceiverMustBeCaller();
     error NotRegistry();
+    error NotClaimManager();
+    error PoolFrozen();
+    error PoolNotFrozen();
+    error SlashExceedsCap(uint256 requested, uint256 available);
 
     // ─────────────────────────── Eventos ───────────────────────────
     event CooldownStarted(address indexed staker, uint256 unlocksAt);
     event CooldownReset(address indexed staker);
     event RewardNotified(uint256 amount, uint256 duration, uint256 periodFinish);
     event RewardPaid(address indexed staker, uint256 amount);
+    event Frozen(uint256 assetsSnapshot);
+    event Unfrozen(uint256 totalSlashed);
+    event Slashed(address indexed recipient, uint256 assets);
 
     // ───────────────────────── Configuración ─────────────────────────
     uint256 internal constant BPS = 10_000;
@@ -52,8 +59,18 @@ contract CoveragePool is ERC4626, ReentrancyGuard {
     mapping(address => uint256) public userRewardPerSharePaid; // "foto" del acumulado por usuario
     mapping(address => uint256) public rewards; // recompensas devengadas y no cobradas
 
+    // ─────────────────────────── Slashing ───────────────────────────
+    bool public frozen; // true mientras hay un claim abierto
+    uint256 public frozenAssetsSnapshot; // totalAssets() al congelar: base del cap
+    uint256 public slashedDuringFreeze; // suma de slashes durante este congelamiento
+
     modifier onlyRegistry() {
         if (msg.sender != registry) revert NotRegistry();
+        _;
+    }
+
+    modifier onlyClaimManager() {
+        if (msg.sender != claimManager) revert NotClaimManager();
         _;
     }
 
@@ -99,6 +116,7 @@ contract CoveragePool is ERC4626, ReentrancyGuard {
 
     /// @notice True solo si el owner esta dentro de su ventana de retirada.
     function canWithdraw(address owner) public view returns (bool) {
+        if (frozen) return false;
         uint256 start = cooldownStart[owner];
         if (start == 0) return false;
         uint256 unlock = start + cooldownPeriod;
@@ -176,6 +194,45 @@ contract CoveragePool is ERC4626, ReentrancyGuard {
         emit RewardPaid(msg.sender, reward);
     }
 
+    // ═══════════════════════════ Slashing ═══════════════════════════
+
+    /// @notice Se llama al abrirse un claim: nadie entra ni sale hasta resolverlo.
+    ///         Se guarda una foto de los activos para calcular el cap de slashing.
+    function freeze() external onlyClaimManager {
+        if (frozen) revert PoolFrozen();
+        frozen = true;
+        frozenAssetsSnapshot = totalAssets();
+        slashedDuringFreeze = 0;
+        emit Frozen(frozenAssetsSnapshot);
+    }
+
+    /// @notice Se llama al resolver el claim (aprobado o rechazado).
+    function unfreeze() external onlyClaimManager {
+        if (!frozen) revert PoolNotFrozen();
+        frozen = false;
+        emit Unfrozen(slashedDuringFreeze);
+    }
+
+    /// @notice Recorta activos del vault y los envia a `recipient` (el contrato que
+    ///         compensara a los afectados). No se queman shares: baja el valor de
+    ///         cada share, asi que todos los stakers pierden en proporcion.
+    /// @dev El cap es ACUMULADO sobre la foto tomada al congelar. Si fuera por
+    ///      llamada, varios slashes pequenos podrian sumar mas que el maximo
+    ///      (5 x 20% ya vacia el pool aunque cada uno respete un cap del 50%).
+    function slash(uint256 assets, address recipient) external onlyClaimManager nonReentrant {
+        if (!frozen) revert PoolNotFrozen();
+        if (assets == 0) revert ZeroAmount();
+        if (recipient == address(0)) revert ZeroAddress();
+
+        uint256 cap = Math.mulDiv(frozenAssetsSnapshot, maxSlashBps, BPS);
+        uint256 available = cap - slashedDuringFreeze;
+        if (assets > available) revert SlashExceedsCap(assets, available);
+
+        slashedDuringFreeze += assets;
+        IERC20(asset()).safeTransfer(recipient, assets);
+        emit Slashed(recipient, assets);
+    }
+
     // ═══════════════════════ ERC-4626 overrides ═══════════════════════
 
     /// @dev Mitiga el inflation attack del primer depositante: las shares
@@ -183,6 +240,15 @@ contract CoveragePool is ERC4626, ReentrancyGuard {
     ///      cuesta ~1e6 veces mas de lo que el atacante podria robar.
     function _decimalsOffset() internal pure override returns (uint8) {
         return 6;
+    }
+
+    /// @dev Con el pool congelado no entra nadie (ver _deposit).
+    function maxDeposit(address) public view override returns (uint256) {
+        return frozen ? 0 : type(uint256).max;
+    }
+
+    function maxMint(address) public view override returns (uint256) {
+        return frozen ? 0 : type(uint256).max;
     }
 
     /// @dev withdraw() y redeem() de OpenZeppelin comprueban estos limites y
@@ -202,7 +268,11 @@ contract CoveragePool is ERC4626, ReentrancyGuard {
     ///      2. Un deposito nuevo reinicia tu cooldown. Sin esto, alguien podria iniciar
     ///         cooldown con 1 wei, esperar, y meter un stake grande justo al abrirse la
     ///         ventana para cobrar primas casi sin estar expuesto.
+    ///      Ademas, con el pool congelado no se puede depositar: el que entrara ahora
+    ///      cargaria con parte del slash de un exploit que nunca respaldo, y a la vez
+    ///      diluiria la perdida de los stakers que si eran responsables.
     function _deposit(address caller, address receiver, uint256 assets, uint256 shares) internal override {
+        if (frozen) revert PoolFrozen();
         if (caller != receiver) revert ReceiverMustBeCaller();
         super._deposit(caller, receiver, assets, shares);
         if (cooldownStart[receiver] != 0) {
@@ -212,10 +282,13 @@ contract CoveragePool is ERC4626, ReentrancyGuard {
     }
 
     /// @dev Si el owner lo retira todo, limpiamos su cooldown.
+    ///      El chequeo de frozen ya lo hacen maxWithdraw/maxRedeem; lo repetimos
+    ///      aqui por defensa en profundidad (si un override futuro se lo salta).
     function _withdraw(address caller, address receiver, address owner, uint256 assets, uint256 shares)
         internal
         override
     {
+        if (frozen) revert PoolFrozen();
         super._withdraw(caller, receiver, owner, assets, shares);
         if (balanceOf(owner) == 0) cooldownStart[owner] = 0;
     }
