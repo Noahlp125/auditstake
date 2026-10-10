@@ -15,6 +15,12 @@ contract CoveragePool is ERC4626, ReentrancyGuard {
     error SameToken();
     error InvalidBps();
     error InvalidDuration();
+    error ZeroAmount();
+    error ReceiverMustBeCaller();
+
+    // ─────────────────────────── Eventos ───────────────────────────
+    event CooldownStarted(address indexed staker, uint256 unlocksAt);
+    event CooldownReset(address indexed staker);
 
     // ───────────────────────── Configuración ─────────────────────────
     uint256 internal constant BPS = 10_000;
@@ -25,6 +31,10 @@ contract CoveragePool is ERC4626, ReentrancyGuard {
     uint256 public immutable cooldownPeriod;
     uint256 public immutable unstakeWindow;
     uint16 public immutable maxSlashBps;
+
+    // ─────────────────────────── Cooldown ───────────────────────────
+    /// @notice Momento en que cada staker inicio su cooldown (0 = sin cooldown activo).
+    mapping(address => uint256) public cooldownStart;
 
     constructor(
         IERC20 asset_,
@@ -55,11 +65,67 @@ contract CoveragePool is ERC4626, ReentrancyGuard {
         maxSlashBps = maxSlashBps_;
     }
 
+    // ═══════════════════════════ Cooldown ═══════════════════════════
+
+    /// @notice Inicia el cooldown. Tras `cooldownPeriod` se abre una ventana de
+    ///         `unstakeWindow` segundos para retirar. Durante el cooldown el stake
+    ///         sigue en riesgo: no se puede salir corriendo al intuir un exploit.
+    function startCooldown() external {
+        if (balanceOf(msg.sender) == 0) revert ZeroAmount();
+        cooldownStart[msg.sender] = block.timestamp;
+        emit CooldownStarted(msg.sender, block.timestamp + cooldownPeriod);
+    }
+
+    /// @notice True solo si el owner esta dentro de su ventana de retirada.
+    function canWithdraw(address owner) public view returns (bool) {
+        uint256 start = cooldownStart[owner];
+        if (start == 0) return false;
+        uint256 unlock = start + cooldownPeriod;
+        return block.timestamp >= unlock && block.timestamp <= unlock + unstakeWindow;
+    }
+
+    // ═══════════════════════ ERC-4626 overrides ═══════════════════════
+
     /// @dev Mitiga el inflation attack del primer depositante: las shares
     ///      tienen 6 decimales extra, asi que donar para manipular el precio
     ///      cuesta ~1e6 veces mas de lo que el atacante podria robar.
     function _decimalsOffset() internal pure override returns (uint8) {
         return 6;
+    }
+
+    /// @dev withdraw() y redeem() de OpenZeppelin comprueban estos limites y
+    ///      revierten si se pide mas. Fuera de la ventana, el limite es 0.
+    function maxWithdraw(address owner) public view override returns (uint256) {
+        return canWithdraw(owner) ? super.maxWithdraw(owner) : 0;
+    }
+
+    function maxRedeem(address owner) public view override returns (uint256) {
+        return canWithdraw(owner) ? super.maxRedeem(owner) : 0;
+    }
+
+    /// @dev Dos reglas que van juntas:
+    ///      1. Solo puedes depositar para ti mismo (caller == receiver). Si se permitiera
+    ///         depositar a favor de otro, un atacante podria resetear el cooldown ajeno
+    ///         con 1 wei y dejar atrapada a la victima (griefing).
+    ///      2. Un deposito nuevo reinicia tu cooldown. Sin esto, alguien podria iniciar
+    ///         cooldown con 1 wei, esperar, y meter un stake grande justo al abrirse la
+    ///         ventana para cobrar primas casi sin estar expuesto.
+    function _deposit(address caller, address receiver, uint256 assets, uint256 shares) internal override {
+        if (caller != receiver) revert ReceiverMustBeCaller();
+        super._deposit(caller, receiver, assets, shares);
+        if (cooldownStart[receiver] != 0) {
+            cooldownStart[receiver] = 0;
+            emit CooldownReset(receiver);
+        }
+    }
+
+    /// @dev Si el owner lo retira todo, limpiamos su cooldown.
+    function _withdraw(address caller, address receiver, address owner, uint256 assets, uint256 shares)
+        internal
+        override
+    {
+        super._withdraw(caller, receiver, owner, assets, shares);
+        if (balanceOf(owner) == 0) cooldownStart[owner] = 0;
     }
 
     /// @dev Shares no transferibles: solo mint (from = 0) y burn (to = 0).
