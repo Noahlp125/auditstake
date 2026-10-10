@@ -4,11 +4,15 @@ pragma solidity 0.8.24;
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {ERC4626} from "@openzeppelin/contracts/token/ERC20/extensions/ERC4626.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
 /// @title CoveragePool
 /// @notice Pool de staking que respalda la seguridad de UN protocolo cubierto.
 contract CoveragePool is ERC4626, ReentrancyGuard {
+    using SafeERC20 for IERC20;
+
     // ─────────────────────────── Errores ───────────────────────────
     error NonTransferable();
     error ZeroAddress();
@@ -17,13 +21,17 @@ contract CoveragePool is ERC4626, ReentrancyGuard {
     error InvalidDuration();
     error ZeroAmount();
     error ReceiverMustBeCaller();
+    error NotRegistry();
 
     // ─────────────────────────── Eventos ───────────────────────────
     event CooldownStarted(address indexed staker, uint256 unlocksAt);
     event CooldownReset(address indexed staker);
+    event RewardNotified(uint256 amount, uint256 duration, uint256 periodFinish);
+    event RewardPaid(address indexed staker, uint256 amount);
 
     // ───────────────────────── Configuración ─────────────────────────
     uint256 internal constant BPS = 10_000;
+    uint256 internal constant PRECISION = 1e36; // ver nota en rewardPerShare()
 
     IERC20 public immutable rewardToken;
     address public immutable registry;
@@ -35,6 +43,19 @@ contract CoveragePool is ERC4626, ReentrancyGuard {
     // ─────────────────────────── Cooldown ───────────────────────────
     /// @notice Momento en que cada staker inicio su cooldown (0 = sin cooldown activo).
     mapping(address => uint256) public cooldownStart;
+
+    // ─────────────────── Recompensas (estilo Synthetix) ───────────────────
+    uint256 public periodFinish; // cuando termina de repartirse la prima actual
+    uint256 public rewardRate; // tokens por segundo, escalado por PRECISION
+    uint256 public lastUpdateTime; // ultimo checkpoint global
+    uint256 public rewardPerShareStored; // acumulado global, escalado por PRECISION
+    mapping(address => uint256) public userRewardPerSharePaid; // "foto" del acumulado por usuario
+    mapping(address => uint256) public rewards; // recompensas devengadas y no cobradas
+
+    modifier onlyRegistry() {
+        if (msg.sender != registry) revert NotRegistry();
+        _;
+    }
 
     constructor(
         IERC20 asset_,
@@ -84,6 +105,77 @@ contract CoveragePool is ERC4626, ReentrancyGuard {
         return block.timestamp >= unlock && block.timestamp <= unlock + unstakeWindow;
     }
 
+    // ═══════════════════════════ Recompensas ═══════════════════════════
+
+    /// @notice El reparto se detiene al llegar a periodFinish.
+    function lastTimeRewardApplicable() public view returns (uint256) {
+        return Math.min(block.timestamp, periodFinish);
+    }
+
+    /// @notice Recompensa acumulada por cada share desde el inicio (escalada por PRECISION).
+    /// @dev PRECISION = 1e36 en vez del clasico 1e18: con el offset de 6 decimales,
+    ///      100 tokens son 1e26 shares. Con 1e18, el incremento por segundo
+    ///      (rate * 1e18 / 1e26) se truncaria a 0 y las recompensas se perderian
+    ///      en silencio. mulDiv evita el overflow del producto intermedio.
+    function rewardPerShare() public view returns (uint256) {
+        uint256 supply = totalSupply();
+        if (supply == 0) return rewardPerShareStored;
+        return rewardPerShareStored + Math.mulDiv(lastTimeRewardApplicable() - lastUpdateTime, rewardRate, supply);
+    }
+
+    /// @notice Recompensas que `account` puede cobrar ahora mismo.
+    function earned(address account) public view returns (uint256) {
+        return Math.mulDiv(balanceOf(account), rewardPerShare() - userRewardPerSharePaid[account], PRECISION)
+            + rewards[account];
+    }
+
+    /// @dev Checkpoint: cierra el tramo de tiempo transcurrido y apunta lo que
+    ///      lleva ganado `account` ANTES de que cambie su balance.
+    function _updateReward(address account) internal {
+        rewardPerShareStored = rewardPerShare();
+        lastUpdateTime = lastTimeRewardApplicable();
+        if (account != address(0)) {
+            rewards[account] = earned(account);
+            userRewardPerSharePaid[account] = rewardPerShareStored;
+        }
+    }
+
+    /// @notice El registry deposita la prima del protocolo y la reparte en streaming
+    ///         durante `duration` segundos. Si queda prima pendiente del periodo
+    ///         anterior, se suma a la nueva.
+    /// @dev Se mide el balance recibido en lugar de fiarse de `amount`: asi se
+    ///      soportan tokens con comision por transferencia (fee-on-transfer).
+    function notifyRewardAmount(uint256 amount, uint256 duration) external onlyRegistry nonReentrant {
+        if (amount == 0) revert ZeroAmount();
+        if (duration == 0) revert InvalidDuration();
+        _updateReward(address(0));
+
+        uint256 balBefore = rewardToken.balanceOf(address(this));
+        rewardToken.safeTransferFrom(msg.sender, address(this), amount);
+        uint256 received = rewardToken.balanceOf(address(this)) - balBefore;
+
+        uint256 leftover;
+        if (block.timestamp < periodFinish) {
+            leftover = (periodFinish - block.timestamp) * rewardRate; // ya escalado
+        }
+        rewardRate = (received * PRECISION + leftover) / duration;
+        lastUpdateTime = block.timestamp;
+        periodFinish = block.timestamp + duration;
+
+        emit RewardNotified(received, duration, periodFinish);
+    }
+
+    /// @notice Cobra las recompensas devengadas.
+    /// @dev Patron checks-effects-interactions: se pone a 0 antes de transferir.
+    function claimRewards() external nonReentrant returns (uint256 reward) {
+        _updateReward(msg.sender);
+        reward = rewards[msg.sender];
+        if (reward == 0) return 0;
+        rewards[msg.sender] = 0;
+        rewardToken.safeTransfer(msg.sender, reward);
+        emit RewardPaid(msg.sender, reward);
+    }
+
     // ═══════════════════════ ERC-4626 overrides ═══════════════════════
 
     /// @dev Mitiga el inflation attack del primer depositante: las shares
@@ -131,8 +223,12 @@ contract CoveragePool is ERC4626, ReentrancyGuard {
     /// @dev Shares no transferibles: solo mint (from = 0) y burn (to = 0).
     ///      Si se pudieran transferir, el cooldown se esquivaria moviendo
     ///      las shares a otra cuenta que ya lo tuviera cumplido.
+    ///      Ademas es el punto unico por el que pasan mint y burn, asi que aqui
+    ///      hacemos el checkpoint de recompensas ANTES de cambiar balances.
     function _update(address from, address to, uint256 value) internal override {
         if (from != address(0) && to != address(0)) revert NonTransferable();
+        _updateReward(from);
+        _updateReward(to);
         super._update(from, to, value);
     }
 }
