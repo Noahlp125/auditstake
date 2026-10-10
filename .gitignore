@@ -18,3 +18,4 @@ docs/
 .env
 .env.*
 !.env.example
+deployments/31337.json
