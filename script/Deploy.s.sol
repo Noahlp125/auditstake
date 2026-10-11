@@ -5,7 +5,6 @@ import {Script, console} from "forge-std/Script.sol";
 import {CoveragePool} from "../src/CoveragePool.sol";
 import {ClaimManager} from "../src/ClaimManager.sol";
 import {CoverageRegistry} from "../src/CoverageRegistry.sol";
-import {PoolFactory} from "../src/PoolFactory.sol";
 import {MockERC20} from "../test/mocks/MockERC20.sol";
 
 /// @notice Despliega AuditStake completo y deja un estado de demo listo para el frontend.
@@ -28,7 +27,6 @@ contract Deploy is Script {
     MockERC20 stakeToken;
     MockERC20 premiumToken;
     MockERC20 bondToken;
-    PoolFactory factory;
     CoverageRegistry registry;
     ClaimManager cm;
     address poolLumen;
@@ -54,35 +52,27 @@ contract Deploy is Script {
         premiumToken = new MockERC20("AuditStake Premium", "PRM");
         bondToken = new MockERC20("AuditStake Bond", "BND");
 
-        factory = new PoolFactory();
-        registry = new CoverageRegistry(deployer, factory);
+        registry = new CoverageRegistry(deployer);
         cm = new ClaimManager(bondToken, BOND, DISPUTE_WINDOW, ARBITRATION_TIMEOUT, address(registry), deployer);
         registry.setClaimManager(cm);
     }
 
     /// @dev Dos protocolos de ejemplo. El deployer hace de sponsor y de arbitro.
+    ///      Cada pool se despliega en su propia transaccion y despues se da de alta en el
+    ///      registry: asi ninguna transaccion supera el maximo de gas por transaccion.
     function _createPools() internal {
-        poolLumen = registry.createPool(
-            _fakeProtocol("Lumen Lending"),
-            deployer,
-            stakeToken,
-            premiumToken,
-            COOLDOWN,
-            WINDOW,
-            5_000,
-            "AuditStake Lumen Lending",
-            "asLUMEN"
-        );
-        poolOrbit = registry.createPool(
-            _fakeProtocol("Orbit Bridge"),
-            deployer,
-            stakeToken,
-            premiumToken,
-            COOLDOWN,
-            WINDOW,
-            5_000,
-            "AuditStake Orbit Bridge",
-            "asORBIT"
+        poolLumen = _deployPool("AuditStake Lumen Lending", "asLUMEN");
+        registry.addPool(poolLumen, _fakeProtocol("Lumen Lending"), deployer);
+
+        poolOrbit = _deployPool("AuditStake Orbit Bridge", "asORBIT");
+        registry.addPool(poolOrbit, _fakeProtocol("Orbit Bridge"), deployer);
+    }
+
+    function _deployPool(string memory name, string memory symbol) internal returns (address) {
+        return address(
+            new CoveragePool(
+                stakeToken, premiumToken, address(registry), address(cm), COOLDOWN, WINDOW, 5_000, name, symbol
+            )
         );
     }
 
@@ -116,7 +106,6 @@ contract Deploy is Script {
         vm.serializeAddress(k, "stakeToken", address(stakeToken));
         vm.serializeAddress(k, "premiumToken", address(premiumToken));
         vm.serializeAddress(k, "bondToken", address(bondToken));
-        vm.serializeAddress(k, "poolFactory", address(factory));
         vm.serializeAddress(k, "registry", address(registry));
         vm.serializeAddress(k, "claimManager", address(cm));
         vm.serializeAddress(k, "poolLumen", poolLumen);

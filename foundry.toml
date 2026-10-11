@@ -14,3 +14,11 @@ runs = 256
 [invariant]
 runs = 128
 depth = 50
+
+# Redes con nombre: `--rpc-url sepolia` lee la URL de la variable SEPOLIA_RPC_URL (.env)
+[rpc_endpoints]
+sepolia = "${SEPOLIA_RPC_URL}"
+
+# Verificacion de codigo en Etherscan (`--verify`)
+[etherscan]
+sepolia = { key = "${ETHERSCAN_API_KEY}" }

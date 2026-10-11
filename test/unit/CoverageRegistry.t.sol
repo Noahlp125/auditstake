@@ -6,14 +6,12 @@ import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {CoveragePool} from "../../src/CoveragePool.sol";
 import {ClaimManager} from "../../src/ClaimManager.sol";
 import {CoverageRegistry} from "../../src/CoverageRegistry.sol";
-import {PoolFactory} from "../../src/PoolFactory.sol";
 import {MockERC20} from "../mocks/MockERC20.sol";
 
 contract CoverageRegistryTest is Test {
     MockERC20 stakeToken;
     MockERC20 premiumToken;
     MockERC20 bondToken;
-    PoolFactory factory;
     CoverageRegistry registry;
     ClaimManager cm;
 
@@ -29,9 +27,8 @@ contract CoverageRegistryTest is Test {
         premiumToken = new MockERC20("Premium", "PRM");
         bondToken = new MockERC20("Bond", "BND");
 
-        // Orden: factory -> registry -> ClaimManager(registry) -> conectar
-        factory = new PoolFactory();
-        registry = new CoverageRegistry(owner, factory);
+        // Orden: registry -> ClaimManager(registry) -> conectar
+        registry = new CoverageRegistry(owner);
         cm = new ClaimManager(bondToken, 10 ether, 3 days, 14 days, address(registry), arbiter);
         vm.prank(owner);
         registry.setClaimManager(cm);
@@ -45,12 +42,15 @@ contract CoverageRegistryTest is Test {
         premiumToken.approve(address(registry), type(uint256).max);
     }
 
-    function _createPool() internal returns (CoveragePool) {
+    /// @dev Despliega un pool que confia en `reg` y en `manager`.
+    function _deployPool(address reg, address manager) internal returns (CoveragePool) {
+        return new CoveragePool(stakeToken, premiumToken, reg, manager, 7 days, 2 days, 5_000, "AuditStake X", "asX");
+    }
+
+    function _addPool() internal returns (CoveragePool pool) {
+        pool = _deployPool(address(registry), address(cm));
         vm.prank(owner);
-        address pool = registry.createPool(
-            protocol, sponsor, stakeToken, premiumToken, 7 days, 2 days, 5_000, "AuditStake Protocol X", "asX"
-        );
-        return CoveragePool(pool);
+        registry.addPool(address(pool), protocol, sponsor);
     }
 
     function _stake(CoveragePool pool, uint256 amount) internal {
@@ -69,36 +69,35 @@ contract CoverageRegistryTest is Test {
     }
 
     function test_RevertWhen_ClaimManagerPointsElsewhere() public {
-        CoverageRegistry fresh = new CoverageRegistry(owner, factory);
+        CoverageRegistry fresh = new CoverageRegistry(owner);
         // cm apunta a `registry`, no a `fresh`
         vm.prank(owner);
         vm.expectRevert(CoverageRegistry.ClaimManagerMismatch.selector);
         fresh.setClaimManager(cm);
     }
 
-    function test_RevertWhen_CreatePoolWithoutClaimManager() public {
-        CoverageRegistry fresh = new CoverageRegistry(owner, factory);
+    function test_RevertWhen_AddPoolWithoutClaimManager() public {
+        CoverageRegistry fresh = new CoverageRegistry(owner);
+        CoveragePool pool = _deployPool(address(fresh), address(cm));
         vm.prank(owner);
         vm.expectRevert(CoverageRegistry.ClaimManagerNotSet.selector);
-        fresh.createPool(protocol, sponsor, stakeToken, premiumToken, 7 days, 2 days, 5_000, "x", "x");
+        fresh.addPool(address(pool), protocol, sponsor);
     }
 
     function test_RevertWhen_NotOwnerSetsClaimManager() public {
-        CoverageRegistry fresh = new CoverageRegistry(owner, factory);
+        CoverageRegistry fresh = new CoverageRegistry(owner);
         vm.prank(attacker);
         vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, attacker));
         fresh.setClaimManager(cm);
     }
 
-    // ─────────────────── Crear pools ───────────────────
+    // ─────────────────── Alta de pools ───────────────────
 
-    function test_CreatePoolWiresEverything() public {
-        CoveragePool pool = _createPool();
+    function test_AddPoolWiresEverything() public {
+        CoveragePool pool = _addPool();
 
         assertEq(pool.registry(), address(registry));
         assertEq(pool.claimManager(), address(cm));
-        assertEq(pool.asset(), address(stakeToken));
-        assertEq(address(pool.rewardToken()), address(premiumToken));
         assertTrue(cm.isPool(address(pool))); // registrado en el ClaimManager
 
         assertEq(registry.poolOf(protocol), address(pool));
@@ -109,23 +108,49 @@ contract CoverageRegistryTest is Test {
         assertEq(registry.poolCount(), 1);
     }
 
-    function test_RevertWhen_NotOwnerCreatesPool() public {
+    function test_RevertWhen_NotOwnerAddsPool() public {
+        CoveragePool pool = _deployPool(address(registry), address(cm));
         vm.prank(attacker);
         vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, attacker));
-        registry.createPool(protocol, sponsor, stakeToken, premiumToken, 7 days, 2 days, 5_000, "x", "x");
+        registry.addPool(address(pool), protocol, sponsor);
     }
 
     function test_RevertWhen_ProtocolAlreadyCovered() public {
-        _createPool();
+        _addPool();
+        CoveragePool other = _deployPool(address(registry), address(cm));
         vm.prank(owner);
         vm.expectRevert(CoverageRegistry.ProtocolAlreadyCovered.selector);
-        registry.createPool(protocol, sponsor, stakeToken, premiumToken, 7 days, 2 days, 5_000, "x", "x");
+        registry.addPool(address(other), protocol, sponsor);
     }
 
-    function test_CreateSeveralPools() public {
-        _createPool();
+    function test_RevertWhen_SamePoolAddedTwice() public {
+        CoveragePool pool = _addPool();
         vm.prank(owner);
-        registry.createPool(makeAddr("protocolY"), sponsor, stakeToken, premiumToken, 7 days, 2 days, 3_000, "y", "y");
+        vm.expectRevert(CoverageRegistry.PoolAlreadyAdded.selector);
+        registry.addPool(address(pool), makeAddr("otherProtocol"), sponsor);
+    }
+
+    /// @dev Un pool cuyo registry es otro no podria recibir primas de este registry.
+    function test_RevertWhen_PoolPointsToAnotherRegistry() public {
+        CoveragePool rogue = _deployPool(attacker, address(cm));
+        vm.prank(owner);
+        vm.expectRevert(CoverageRegistry.PoolMismatch.selector);
+        registry.addPool(address(rogue), protocol, sponsor);
+    }
+
+    /// @dev Un pool que obedece a otro ClaimManager escaparia de nuestros claims.
+    function test_RevertWhen_PoolPointsToAnotherClaimManager() public {
+        CoveragePool rogue = _deployPool(address(registry), attacker);
+        vm.prank(owner);
+        vm.expectRevert(CoverageRegistry.PoolMismatch.selector);
+        registry.addPool(address(rogue), protocol, sponsor);
+    }
+
+    function test_AddSeveralPools() public {
+        _addPool();
+        CoveragePool other = _deployPool(address(registry), address(cm));
+        vm.prank(owner);
+        registry.addPool(address(other), makeAddr("protocolY"), sponsor);
 
         address[] memory pools = registry.allPools();
         assertEq(pools.length, 2);
@@ -135,7 +160,7 @@ contract CoverageRegistryTest is Test {
     // ─────────────────── Primas ───────────────────
 
     function test_SponsorPaysPremium() public {
-        CoveragePool pool = _createPool();
+        CoveragePool pool = _addPool();
         _stake(pool, 100 ether);
 
         vm.prank(sponsor);
@@ -156,14 +181,14 @@ contract CoverageRegistryTest is Test {
     }
 
     function test_RevertWhen_PremiumOnEmptyPool() public {
-        CoveragePool pool = _createPool();
+        CoveragePool pool = _addPool();
         vm.prank(sponsor);
         vm.expectRevert(CoverageRegistry.PoolEmpty.selector);
         registry.payPremium(address(pool), 1_000 ether, 30 days);
     }
 
     function test_RevertWhen_DurationTooShort() public {
-        CoveragePool pool = _createPool();
+        CoveragePool pool = _addPool();
         _stake(pool, 100 ether);
         vm.prank(sponsor);
         vm.expectRevert(CoverageRegistry.InvalidDuration.selector);
@@ -171,7 +196,7 @@ contract CoverageRegistryTest is Test {
     }
 
     function test_RevertWhen_DurationTooLong() public {
-        CoveragePool pool = _createPool();
+        CoveragePool pool = _addPool();
         _stake(pool, 100 ether);
         vm.prank(sponsor);
         vm.expectRevert(CoverageRegistry.InvalidDuration.selector);
@@ -182,7 +207,7 @@ contract CoverageRegistryTest is Test {
     ///      paga 1 wei con duracion de 365 dias. Si se le permitiera, los 500 pendientes
     ///      se repartirian en un ano en lugar de en 5 dias. Debe revertir.
     function test_RevertWhen_AttackerDilutesRewardRate() public {
-        CoveragePool pool = _createPool();
+        CoveragePool pool = _addPool();
         _stake(pool, 100 ether);
         vm.prank(sponsor);
         registry.payPremium(address(pool), 1_000 ether, 10 days);
@@ -198,28 +223,10 @@ contract CoverageRegistryTest is Test {
 
     /// @dev Nadie puede saltarse el registry llamando al pool directamente.
     function test_RevertWhen_NotifyPoolDirectly() public {
-        CoveragePool pool = _createPool();
+        CoveragePool pool = _addPool();
         vm.prank(attacker);
         vm.expectRevert(CoveragePool.NotRegistry.selector);
         pool.notifyRewardAmount(1, 365 days);
-    }
-
-    /// @dev Cualquiera puede usar la factory, pero ese pool no sirve de nada:
-    ///      su registry es el atacante y el ClaimManager no lo conoce.
-    function test_RoguePoolFromFactoryIsUseless() public {
-        vm.prank(attacker);
-        address rogue =
-            factory.deploy(stakeToken, premiumToken, address(cm), 7 days, 2 days, 5_000, "fake", "fake");
-
-        assertEq(CoveragePool(rogue).registry(), attacker);
-        assertFalse(cm.isPool(rogue));
-        (address p,,) = registry.poolInfo(rogue);
-        assertEq(p, address(0));
-    }
-
-    function test_RevertWhen_ZeroFactory() public {
-        vm.expectRevert(CoverageRegistry.ZeroAddress.selector);
-        new CoverageRegistry(owner, PoolFactory(address(0)));
     }
 
     // ─────────────────── Propiedad en dos pasos ───────────────────

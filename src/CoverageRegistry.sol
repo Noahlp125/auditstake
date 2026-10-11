@@ -7,12 +7,14 @@ import {Ownable, Ownable2Step} from "@openzeppelin/contracts/access/Ownable2Step
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {CoveragePool} from "./CoveragePool.sol";
 import {ClaimManager} from "./ClaimManager.sol";
-import {PoolFactory} from "./PoolFactory.sol";
 
 /// @title CoverageRegistry
 /// @notice Punto de entrada del protocolo:
-///         - Crea (via PoolFactory) un CoveragePool por protocolo cubierto y lo registra en el ClaimManager.
+///         - Da de alta un CoveragePool por protocolo cubierto y lo registra en el ClaimManager.
 ///         - Recibe las primas de cada protocolo y las reparte a su pool.
+/// @dev Los pools se despliegan FUERA del registry (desde el script) y luego se dan de alta
+///      con addPool(). Antes los creaba una PoolFactory, pero su despliegue necesitaba mas
+///      gas que el maximo por transaccion de la red (EIP-7825: 2^24 ≈ 16,7M) en Sepolia.
 /// @dev Ownable2Step: transferir la propiedad exige que el nuevo owner la acepte,
 ///      asi un error al teclear la direccion no deja el registry sin dueno.
 contract CoverageRegistry is Ownable2Step, ReentrancyGuard {
@@ -30,6 +32,8 @@ contract CoverageRegistry is Ownable2Step, ReentrancyGuard {
     error ClaimManagerAlreadySet();
     error ClaimManagerNotSet();
     error ClaimManagerMismatch();
+    error PoolMismatch();
+    error PoolAlreadyAdded();
     error ProtocolAlreadyCovered();
     error UnknownPool();
     error NotSponsor();
@@ -38,14 +42,13 @@ contract CoverageRegistry is Ownable2Step, ReentrancyGuard {
 
     // ─────────────────────────── Eventos ───────────────────────────
     event ClaimManagerSet(address indexed claimManager);
-    event PoolCreated(address indexed pool, address indexed protocol, address indexed sponsor);
+    event PoolAdded(address indexed pool, address indexed protocol, address indexed sponsor);
     event PremiumPaid(address indexed pool, address indexed payer, uint256 amount, uint256 duration);
 
     // ───────────────────────── Configuración ─────────────────────────
     uint256 public constant MIN_PREMIUM_DURATION = 7 days;
     uint256 public constant MAX_PREMIUM_DURATION = 365 days;
 
-    PoolFactory public immutable factory;
     ClaimManager public claimManager;
 
     // ─────────────────────────── Estado ───────────────────────────
@@ -53,10 +56,7 @@ contract CoverageRegistry is Ownable2Step, ReentrancyGuard {
     mapping(address => address) public poolOf; // protocolo => pool
     address[] internal _pools;
 
-    constructor(address owner_, PoolFactory factory_) Ownable(owner_) {
-        if (address(factory_) == address(0)) revert ZeroAddress();
-        factory = factory_;
-    }
+    constructor(address owner_) Ownable(owner_) {}
 
     // ═══════════════════════════ Configuracion inicial ═══════════════════════════
 
@@ -75,33 +75,28 @@ contract CoverageRegistry is Ownable2Step, ReentrancyGuard {
 
     // ═══════════════════════════ Pools ═══════════════════════════
 
-    /// @notice Crea el pool de cobertura de `protocol`.
+    /// @notice Da de alta el pool de cobertura de `protocol`.
+    /// @param pool Un CoveragePool ya desplegado que apunte a ESTE registry y a NUESTRO ClaimManager.
     /// @param sponsor Direccion del equipo del protocolo: la unica que podra pagar primas.
-    function createPool(
-        address protocol,
-        address sponsor,
-        IERC20 stakeToken,
-        IERC20 premiumToken,
-        uint256 cooldownPeriod,
-        uint256 unstakeWindow,
-        uint16 maxSlashBps,
-        string calldata name,
-        string calldata symbol
-    ) external onlyOwner returns (address pool) {
+    /// @dev Se comprueba que el pool confia en este registry y en nuestro ClaimManager (son
+    ///      immutables del pool). Un pool que apuntara a otros contratos no podria recibir
+    ///      primas ni ser congelado, y se rechaza.
+    function addPool(address pool, address protocol, address sponsor) external onlyOwner {
         if (address(claimManager) == address(0)) revert ClaimManagerNotSet();
-        if (protocol == address(0) || sponsor == address(0)) revert ZeroAddress();
+        if (pool == address(0) || protocol == address(0) || sponsor == address(0)) revert ZeroAddress();
         if (poolOf[protocol] != address(0)) revert ProtocolAlreadyCovered();
-
-        pool = factory.deploy(
-            stakeToken, premiumToken, address(claimManager), cooldownPeriod, unstakeWindow, maxSlashBps, name, symbol
-        );
+        if (poolInfo[pool].protocol != address(0)) revert PoolAlreadyAdded();
+        if (CoveragePool(pool).registry() != address(this) || CoveragePool(pool).claimManager() != address(claimManager))
+        {
+            revert PoolMismatch();
+        }
 
         poolInfo[pool] = PoolInfo({protocol: protocol, sponsor: sponsor, createdAt: uint64(block.timestamp)});
         poolOf[protocol] = pool;
         _pools.push(pool);
 
         claimManager.registerPool(pool);
-        emit PoolCreated(pool, protocol, sponsor);
+        emit PoolAdded(pool, protocol, sponsor);
     }
 
     // ═══════════════════════════ Primas ═══════════════════════════

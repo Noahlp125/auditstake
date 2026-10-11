@@ -5,7 +5,6 @@ import {Test} from "forge-std/Test.sol";
 import {CoveragePool} from "../../src/CoveragePool.sol";
 import {ClaimManager} from "../../src/ClaimManager.sol";
 import {CoverageRegistry} from "../../src/CoverageRegistry.sol";
-import {PoolFactory} from "../../src/PoolFactory.sol";
 import {MockERC20} from "../mocks/MockERC20.sol";
 
 /// @notice La historia completa del protocolo, de principio a fin.
@@ -14,7 +13,6 @@ contract FullFlowTest is Test {
     MockERC20 stakeToken;
     MockERC20 premiumToken;
     MockERC20 bondToken;
-    PoolFactory factory;
     CoverageRegistry registry;
     ClaimManager cm;
     CoveragePool pool;
@@ -33,14 +31,14 @@ contract FullFlowTest is Test {
         premiumToken = new MockERC20("Premium", "PRM");
         bondToken = new MockERC20("Bond", "BND");
 
-        factory = new PoolFactory();
-        registry = new CoverageRegistry(owner, factory);
+        registry = new CoverageRegistry(owner);
         cm = new ClaimManager(bondToken, 10 ether, 3 days, 14 days, address(registry), arbiter);
         vm.startPrank(owner);
         registry.setClaimManager(cm);
-        pool = CoveragePool(
-            registry.createPool(protocol, sponsor, stakeToken, premiumToken, 7 days, 2 days, 5_000, "AuditStake X", "asX")
+        pool = new CoveragePool(
+            stakeToken, premiumToken, address(registry), address(cm), 7 days, 2 days, 5_000, "AuditStake X", "asX"
         );
+        registry.addPool(address(pool), protocol, sponsor);
         vm.stopPrank();
 
         stakeToken.mint(alice, 300 ether);
