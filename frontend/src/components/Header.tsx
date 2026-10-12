@@ -5,6 +5,7 @@ import { usePathname } from 'next/navigation'
 import { useBlockNumber } from 'wagmi'
 import { ConnectButton } from './ConnectButton'
 import { TimeWarp } from './TimeWarp'
+import { NETWORK_LABEL } from '@/lib/network'
 
 function ShieldIcon() {
   return (
@@ -45,7 +46,7 @@ export function Header() {
           <TimeWarp />
           <span className="pill" title={blockNumber ? `Bloque ${blockNumber}` : undefined}>
             <span className={`dot ${isError || !blockNumber ? 'off' : ''}`} />
-            {isError ? 'Anvil no responde' : blockNumber ? `Anvil · bloque ${blockNumber}` : 'Conectando…'}
+            {isError ? `${NETWORK_LABEL} no responde` : blockNumber ? `${NETWORK_LABEL} · bloque ${blockNumber}` : 'Conectando…'}
           </span>
           <ConnectButton />
         </div>

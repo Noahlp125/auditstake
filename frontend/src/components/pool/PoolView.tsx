@@ -6,6 +6,7 @@ import { usePool } from '@/hooks/usePool'
 import { useChainTime } from '@/hooks/useChainTime'
 import { useTx } from '@/hooks/useTx'
 import { errorMessage, shortAddress } from '@/lib/format'
+import { explorerUrl } from '@/lib/network'
 import { StatusChip } from '@/components/ExploreView'
 import { RewardsCard } from './RewardsCard'
 import { PositionCard } from './PositionCard'
@@ -45,6 +46,9 @@ export function PoolView({ address }: { address: `0x${string}` }) {
           <span style={{ fontSize: 14, color: 'var(--muted)' }}>
             Contrato cubierto <span className="mono" style={{ color: 'var(--ink)' }}>{shortAddress(data.protocol)}</span>
             {' · '}Pool <span className="mono" style={{ color: 'var(--ink)' }}>{shortAddress(address)}</span>
+            {explorerUrl(address) && (
+              <>{' · '}<a href={explorerUrl(address)} target="_blank" rel="noreferrer">Ver en Etherscan</a></>
+            )}
           </span>
         </section>
 

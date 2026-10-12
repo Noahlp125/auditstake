@@ -2,6 +2,7 @@ import type { Metadata } from 'next'
 import { Suspense, type ReactNode } from 'react'
 import { Providers } from './providers'
 import { Header } from '@/components/Header'
+import { NetworkGuard } from '@/components/NetworkGuard'
 import './globals.css'
 
 export const metadata: Metadata = {
@@ -28,7 +29,7 @@ export default function RootLayout({ children }: { children: ReactNode }) {
           <Suspense fallback={<div className="header" style={{ height: 72 }} />}>
             <Header />
           </Suspense>
-          {children}
+          <NetworkGuard>{children}</NetworkGuard>
         </Providers>
       </body>
     </html>

@@ -1,27 +1,38 @@
 'use client'
 
 import { useSyncExternalStore } from 'react'
-import { useConnect, useConnection, useConnectors, useDisconnect } from 'wagmi'
+import { useConnect, useConnection, useConnectors, useDisconnect, useSwitchChain } from 'wagmi'
+import { TARGET_CHAIN } from '@/lib/network'
 import { shortAddress } from '@/lib/format'
 
 /**
  * Dos formas de conectarse:
  *  - "Cuenta de prueba": la cuenta (0) de Anvil, sin wallet ni firmas. Solo en local.
- *  - "MetaMask": la wallet del navegador. La que se usara en Sepolia.
+ *  - "MetaMask": la wallet del navegador. La que se usa en Sepolia.
  */
 const noop = () => () => {}
 
 export function ConnectButton() {
-  // El servidor no sabe si estas conectada: hasta que la pagina carga en el
-  // navegador se pinta un hueco, para que el HTML del servidor y el del
-  // navegador coincidan (si no, React da un error de "hydration").
+  // Hasta que la pagina carga en el navegador se pinta un hueco, para que el HTML
+  // del servidor y el del navegador coincidan (si no, error de "hydration").
   const mounted = useSyncExternalStore(noop, () => true, () => false)
-  const { address, isConnected, connector } = useConnection()
+  const { address, isConnected, connector, chainId } = useConnection()
+  const { mutate: switchChain, isPending: switching } = useSwitchChain()
   const connectors = useConnectors()
   const { mutate: connect, isPending } = useConnect()
   const { mutate: disconnect } = useDisconnect()
 
   if (!mounted) return <span className="btn-wallet" aria-hidden="true" style={{ visibility: 'hidden' }}>0x0000…0000</span>
+
+  // MetaMask conectado a otra red (p. ej. Ethereum mainnet): ofrecemos cambiar
+  if (isConnected && chainId !== TARGET_CHAIN.id) {
+    return (
+      <button type="button" className="btn-wallet" style={{ background: 'var(--alert-soft)', color: 'var(--alert-ink)' }}
+        disabled={switching} onClick={() => switchChain({ chainId: TARGET_CHAIN.id })}>
+        {switching ? 'Cambiando…' : `Cambiar a ${TARGET_CHAIN.name}`}
+      </button>
+    )
+  }
 
   if (isConnected) {
     return (
@@ -47,7 +58,8 @@ export function ConnectButton() {
         </button>
       )}
       {browser && (
-        <button type="button" className="btn-wallet" disabled={isPending} onClick={() => connect({ connector: browser })}>
+        <button type="button" className="btn-wallet" disabled={isPending}
+          onClick={() => connect({ connector: browser, chainId: TARGET_CHAIN.id })}>
           MetaMask
         </button>
       )}
