@@ -2,6 +2,7 @@
 
 import Link from 'next/link'
 import { usePools } from '@/hooks/usePools'
+import { FaucetCard } from '@/components/FaucetCard'
 import { useChainTime } from '@/hooks/useChainTime'
 import { annualPremium } from '@/lib/rewards'
 import { errorMessage, formatDuration, formatToken, shortAddress } from '@/lib/format'
@@ -60,6 +61,8 @@ export function ExploreView() {
           ))}
         </div>
       </section>
+
+      <FaucetCard />
 
       <section style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
         <h2 style={{ fontSize: 24, fontWeight: 600 }}>Pools de cobertura</h2>
